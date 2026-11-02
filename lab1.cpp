@@ -4,7 +4,6 @@
 #include <stdexcept>
 #include <random>
 #include <type_traits>
-#include <initializer_list>
 #include <cstddef>
 
 template <typename T>
@@ -17,41 +16,68 @@ struct point {
 };
 
 template <typename T>
-double point_distance(const point<T>& a, const point<T>& b) {
-    double dx = static_cast<double>(a.x) - static_cast<double>(b.x);
-    double dy = static_cast<double>(a.y) - static_cast<double>(b.y);
-    return std::sqrt(dx * dx + dy * dy);
-}
+struct is_complex : std::false_type {};
 
 template <typename U>
-double point_distance(const point<std::complex<U>>& a,
-    const point<std::complex<U>>& b) {
-    return std::sqrt(std::norm(a.x - b.x) + std::norm(a.y - b.y));
+struct is_complex<std::complex<U>> : std::true_type {};
+
+template <typename T>
+inline constexpr bool is_complex_v = is_complex<T>::value;
+
+template <typename T>
+using coord_value_t = typename std::conditional<
+    is_complex_v<T>,
+    typename T::value_type,
+    T
+>::type;
+
+template <typename T>
+coord_value_t<T> coord_abs_diff(const T& a, const T& b) {
+    if constexpr (is_complex_v<T>) {
+        return std::abs(a - b);
+    }
+    else {
+        return std::fabs(a - b);
+    }
 }
 
 template <typename T>
-T make_coord(double v) {
+double point_distance(const point<T>& a, const point<T>& b) {
+    if constexpr (is_complex_v<T>) {
+        using U = typename T::value_type;
+        U dx = std::abs(a.x - b.x);
+        U dy = std::abs(a.y - b.y);
+        return static_cast<double>(std::sqrt(dx * dx + dy * dy));
+    }
+    else {
+        double dx = static_cast<double>(a.x) - static_cast<double>(b.x);
+        double dy = static_cast<double>(a.y) - static_cast<double>(b.y);
+        return std::sqrt(dx * dx + dy * dy);
+    }
+}
+
+template <typename T, typename Gen>
+T make_coord(Gen& gen, double m1, double m2) {
     if constexpr (std::is_same_v<T, int>) {
-        return static_cast<T>(std::llround(v));
+        std::uniform_int_distribution<int> dist(
+            static_cast<int>(std::ceil(m1)),
+            static_cast<int>(std::floor(m2)));
+        return dist(gen);
     }
     else if constexpr (std::is_same_v<T, float> ||
         std::is_same_v<T, double>) {
-        return static_cast<T>(v);
+        std::uniform_real_distribution<T> dist(
+            static_cast<T>(m1), static_cast<T>(m2));
+        return dist(gen);
     }
-    else {
+    else if constexpr (is_complex_v<T>) {
         using U = typename T::value_type;
-        return T(static_cast<U>(v), U{ 0 });
-    }
-}
-
-template <typename T>
-double to_double(const T& v) {
-    if constexpr (std::is_same_v<T, std::complex<float>> ||
-        std::is_same_v<T, std::complex<double>>) {
-        return static_cast<double>(v.real());
+        std::uniform_real_distribution<U> dist(
+            static_cast<U>(m1), static_cast<U>(m2));
+        return T(dist(gen), dist(gen));
     }
     else {
-        return static_cast<double>(v);
+        static_assert(sizeof(T) == 0, "make_coord: неподдерживаемый тип");
     }
 }
 
@@ -59,8 +85,9 @@ template <typename T>
 class polyline {
 public:
     using point_type = point<T>;
+    using coord_type = coord_value_t<T>;
 
-    static constexpr double eps = 1e-9;
+    static constexpr double eps = std::is_same_v<coord_type, float> ? 1e-6 : 1e-9;
 
 private:
     point_type* data_;
@@ -99,17 +126,10 @@ public:
         allocate(n);
         std::random_device rd;
         std::mt19937 gen(rd());
-        std::uniform_real_distribution<double> dist(m1, m2);
         for (std::size_t i = 0; i < size_; ++i) {
-            data_[i].x = make_coord<T>(dist(gen));
-            data_[i].y = make_coord<T>(dist(gen));
+            data_[i].x = make_coord<T>(gen, m1, m2);
+            data_[i].y = make_coord<T>(gen, m1, m2);
         }
-    }
-
-    polyline(std::initializer_list<point_type> init) : data_(nullptr), size_(0) {
-        allocate(init.size());
-        std::size_t i = 0;
-        for (const auto& p : init) data_[i++] = p;
     }
 
     polyline(const polyline& other) : data_(nullptr), size_(0) {
@@ -175,7 +195,7 @@ public:
     }
 
     static bool coord_eq(const T& a, const T& b) {
-        return std::fabs(to_double(a) - to_double(b)) <= eps;
+        return coord_abs_diff(a, b) <= eps;
     }
 
     bool operator==(const polyline& other) const {
@@ -206,27 +226,54 @@ polyline<T> make_right_trapezoid(const point<T>& start,
     if (a < 0 || b < 0 || h < 0)
         throw std::invalid_argument("прямоугольная трапеция: отрицательный параметр");
 
-    double sx = to_double(start.x);
-    double sy = to_double(start.y);
+    if constexpr (is_complex_v<T>) {
+        using U = typename T::value_type;
+        U ua = static_cast<U>(a);
+        U ub = static_cast<U>(b);
+        U uh = static_cast<U>(h);
 
-    polyline<T> trap;
-    trap += point<T>(make_coord<T>(sx), make_coord<T>(sy));
-    trap += point<T>(make_coord<T>(sx + b), make_coord<T>(sy));
-    trap += point<T>(make_coord<T>(sx + b), make_coord<T>(sy + h));
-    trap += point<T>(make_coord<T>(sx + a), make_coord<T>(sy + h));
-    trap += point<T>(make_coord<T>(sx), make_coord<T>(sy));
-    return trap;
+        point<T> p0 = start;
+        point<T> p1(start.x + T(ub, U{ 0 }), start.y);
+        point<T> p2(start.x + T(ub, U{ 0 }), start.y + T(uh, U{ 0 }));
+        point<T> p3(start.x + T(ua, U{ 0 }), start.y + T(uh, U{ 0 }));
+
+        polyline<T> trap;
+        trap += p0;
+        trap += p1;
+        trap += p2;
+        trap += p3;
+        trap += p0;
+        return trap;
+    }
+    else {
+        T ta = static_cast<T>(a);
+        T tb = static_cast<T>(b);
+        T th = static_cast<T>(h);
+
+        point<T> p0 = start;
+        point<T> p1(start.x + tb, start.y);
+        point<T> p2(start.x + tb, start.y + th);
+        point<T> p3(start.x + ta, start.y + th);
+
+        polyline<T> trap;
+        trap += p0;
+        trap += p1;
+        trap += p2;
+        trap += p3;
+        trap += p0;
+        return trap;
+    }
 }
 
 int main() {
     try {
-        std::cout << "Прямоугольная трапеция \n";
+        std::cout << "Задача: прямоугольная трапеция\n";
         point<int> start(0, 0);
         auto trap = make_right_trapezoid(start, 4, 8, 3);
         std::cout << trap << "\n";
         std::cout << "длина = " << trap.length() << "\n";
 
-        std::cout << "Демонстрация на случайном объекте (int) \n";
+        std::cout << "Случайная ломаная (int)\n";
         polyline<int> r1(5, -10.0, 10.0);
         std::cout << "r1 = " << r1 << "\n";
         std::cout << "r1.length() = " << r1.length() << "\n";
@@ -246,16 +293,25 @@ int main() {
         r3 += extra;
         std::cout << "r3 (после +=) = " << r3 << "\n";
 
-        std::cout << "\n Демонстрация на случайном объекте (double) \n";
+        std::cout << "\nСлучайная ломаная (double)\n";
         polyline<double> d1(4, 0.0, 1.0);
         std::cout << "d1 = " << d1 << "\n";
         std::cout << "d1.length() = " << d1.length() << "\n";
 
-        std::cout << "\n Демонстрация на случайном объекте (complex<double>) \n";
+        std::cout << "\nСлучайная ломаная (complex<double>)\n";
         polyline<std::complex<double>> c1(3, -2.0, 2.0);
+        std::cout << "c1 = " << c1 << "\n";
         std::cout << "c1.length() = " << c1.length() << "\n";
 
-        std::cout << "\n Исключения \n";
+        std::cout << "\nСравнение complex<double> с учётом мнимой части\n";
+        using CD = std::complex<double>;
+        polyline<CD> a(point<CD>(CD(1.0, 0.0), CD(2.0, 0.0)));
+        polyline<CD> b(point<CD>(CD(1.0, 1e-12), CD(2.0, 0.0)));
+        polyline<CD> c(point<CD>(CD(1.0, 1.0), CD(2.0, 0.0)));
+        std::cout << "a == b (im отличается на 1e-12) ? " << (a == b) << "\n";
+        std::cout << "a == c (im отличается на 1)     ? " << (a == c) << "\n";
+
+        std::cout << "\nИсключения\n";
 
         try {
             auto bad = r1[100];
